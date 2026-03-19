@@ -22,7 +22,6 @@
   -------------------------------------------------------------------------------
 */
 
-#include <#ifdef.h>
 #include <iostream>
 #include <iomanip>
 #include <string>
@@ -48,14 +47,26 @@
 #include <unistd.h>
 #include <termios.h>
 
+// Portable headers
+#include <openssl/ripemd.h>
+
 // Local headers
 #include "p2pkh_decoder.h"
-#include "ripemd160_avx2.h"
-#include "ripemd160_avx2.h"
 #include "SECP256K1.h"
 #include "Point.h"
 #include "Int.h"
 #include "IntGroup.h"
+
+// Guard x86-specific headers
+#ifdef __x86_64__
+#include <immintrin.h>
+#endif
+
+// AVX2 headers (only used if AVX2 is available)
+#ifdef __AVX2__
+#include "ripemd160_avx2.h"
+#include "sha256_avx2.h"
+#endif
 
 // =====================
 // Global configurable settings
@@ -540,96 +551,21 @@ static inline std::string fastRandomHex(int n) {
 }
 
 // -----------------------------------------------------------------------------
-// p2pkh in batch
+// Portable p2pkh batch function (replaces AVX2 version)
 // -----------------------------------------------------------------------------
-using Align64 = std::array<uint8_t, 64>;
-using Align32 = std::array<uint8_t, 32>;
-
-static inline __attribute__((always_inline))
-void prepareShaBlock(const uint8_t* dataSrc, size_t dataLen, uint8_t* outBlock) {
-    std::fill_n(outBlock, 64, 0);
-    memcpy(outBlock, dataSrc, dataLen);
-    outBlock[dataLen] = 0x80;
-    uint32_t bitLen = (uint32_t)(dataLen * 8);
-    outBlock[60] = (bitLen >> 24) & 0xFF;
-    outBlock[61] = (bitLen >> 16) & 0xFF;
-    outBlock[62] = (bitLen >> 8 ) & 0xFF;
-    outBlock[63] =  bitLen        & 0xFF;
-}
-
-static inline __attribute__((always_inline))
-void prepareRipemdBlock(const uint8_t* dataSrc, uint8_t* outBlock) {
-    std::fill_n(outBlock, 64, 0);
-    memcpy(outBlock, dataSrc, 32);
-    outBlock[32] = 0x80;
-    uint32_t bitLen = 256;
-    outBlock[60] = (bitLen >> 24) & 0xFF;
-    outBlock[61] = (bitLen >> 16) & 0xFF;
-    outBlock[62] = (bitLen >> 8 ) & 0xFF;
-    outBlock[63] =  bitLen        & 0xFF;
-}
-
 static void computeHash160BatchBinSingle(int numKeys,
                                          uint8_t pubKeys[][33],
                                          uint8_t hashRes[][20]) {
-    std::array<Align64, HASH_BATCH_SIZE> shaIn;
-    std::array<Align32, HASH_BATCH_SIZE> shaOut;
-    std::array<Align64, HASH_BATCH_SIZE> ripemdIn;
-    std::array<std::array<uint8_t,20>, HASH_BATCH_SIZE> ripemdOut;
+    for (int i = 0; i < numKeys; ++i) {
+        // SHA‑256 of the public key
+        std::vector<uint8_t> pub(pubKeys[i], pubKeys[i] + 33);
+        std::vector<uint8_t> sha256 = simpleSHA256(pub);
 
-    int totalB = (numKeys + (HASH_BATCH_SIZE - 1)) / HASH_BATCH_SIZE;
-    for(int b=0; b<totalB; ++b){
-        int bCount = std::min(HASH_BATCH_SIZE, numKeys - b * HASH_BATCH_SIZE);
-
-        /* ── Prepare the 16 SHA blocks ─────────────────── */
-        for(int i=0; i<bCount; ++i){
-            int idx = b * HASH_BATCH_SIZE + i;
-            prepareShaBlock(pubKeys[idx], 33, shaIn[i].data());
-        }
-        for(int i=bCount; i<HASH_BATCH_SIZE; ++i)
-            memcpy(shaIn[i].data(), shaIn[0].data(), 64);
-
-        const uint8_t* inPtr[HASH_BATCH_SIZE];
-        uint8_t*       outPtr[HASH_BATCH_SIZE];
-        for(int i=0; i<HASH_BATCH_SIZE; ++i){
-            inPtr[i]  = shaIn[i].data();
-            outPtr[i] = shaOut[i].data();
-        }
-
-        /* ── SHA-256: two passes 8-wide ─────────────── */
-        for(int blk=0; blk<HASH_BATCH_SIZE; blk+=8)
-            sha256avx2_8B(inPtr[blk+0],inPtr[blk+1],inPtr[blk+2],inPtr[blk+3],
-                          inPtr[blk+4],inPtr[blk+5],inPtr[blk+6],inPtr[blk+7],
-                          outPtr[blk+0],outPtr[blk+1],outPtr[blk+2],outPtr[blk+3],
-                          outPtr[blk+4],outPtr[blk+5],outPtr[blk+6],outPtr[blk+7]);
-
-        /* ── Prepare the 16 RIPEMD blocks ──────────────── */
-        for(int i=0; i<bCount; ++i)
-            prepareRipemdBlock(shaOut[i].data(), ripemdIn[i].data());
-        for(int i=bCount; i<HASH_BATCH_SIZE; ++i)
-            memcpy(ripemdIn[i].data(), ripemdIn[0].data(), 64);
-
-        for(int i=0; i<HASH_BATCH_SIZE; ++i){
-            inPtr[i]  = ripemdIn[i].data();
-            outPtr[i] = reinterpret_cast<uint8_t*>(ripemdOut[i].data());
-        }
-
-        /* ── RIPEMD-160: two 8-wide passes ──────────── */
-        for(int blk=0; blk<HASH_BATCH_SIZE; blk+=8)
-            ripemd160avx2::ripemd160avx2_32(
-                (unsigned char*)inPtr [blk+0],(unsigned char*)inPtr [blk+1],
-                (unsigned char*)inPtr [blk+2],(unsigned char*)inPtr [blk+3],
-                (unsigned char*)inPtr [blk+4],(unsigned char*)inPtr [blk+5],
-                (unsigned char*)inPtr [blk+6],(unsigned char*)inPtr [blk+7],
-                outPtr [blk+0], outPtr [blk+1], outPtr [blk+2], outPtr [blk+3],
-                outPtr [blk+4], outPtr [blk+5], outPtr [blk+6], outPtr [blk+7]
-            );
-
-        /* ── Copy to output ─────────────────────── */
-        for(int i=0; i<bCount; ++i){
-            int idx = b * HASH_BATCH_SIZE + i;
-            memcpy(hashRes[idx], ripemdOut[i].data(), 20);
-        }
+        // RIPEMD‑160 of the SHA‑256 result
+        RIPEMD160_CTX rctx;
+        RIPEMD160_Init(&rctx);
+        RIPEMD160_Update(&rctx, sha256.data(), sha256.size());
+        RIPEMD160_Final(hashRes[i], &rctx);
     }
 }
 
@@ -1285,7 +1221,6 @@ int main(int argc, char* argv[])
         IntGroup modGroup(g_pointsBatchSize);
         std::vector<std::array<uint8_t,33>> pubKeys(fullBatch);
         std::array<std::array<uint8_t,20>, HASH_BATCH_SIZE> hashOut;
-        __m128i targ16 = _mm_loadu_si128((const __m128i*)targetHash.data());
         unsigned long long localCount = 0;
         std::vector<Point> pBatch(fullBatch);
 
@@ -1412,9 +1347,8 @@ int main(int argc, char* argv[])
                             reinterpret_cast<uint8_t(*)[20]>(hashOut.data())
                         );
                         for (int k=0; k<localBatch; ++k) {
-                            __m128i c16 = _mm_loadu_si128((const __m128i*)hashOut[k].data());
-                            __m128i cmp = _mm_cmpeq_epi8(c16, targ16);
-                            if (_mm_movemask_epi8(cmp) == 0xFFFF) {
+                            // Portable comparison: use memcmp instead of SSE
+                            if (memcmp(hashOut[k].data(), targetHash.data(), 20) == 0) {
                                 #pragma omp critical
                                 if (!g_found.load()) {
                                     g_found.store(true);
