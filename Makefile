@@ -17,8 +17,7 @@ LTO   ?= 1
 
 CXX  ?= g++
 
-SRC  = KeyQuest.cpp SECP256K1.cpp Int.cpp IntGroup.cpp IntMod.cpp Point.cpp \
-       ripemd160_avx2.cpp p2pkh_decoder.cpp sha256_avx2.cpp
+SRC = KeyQuest.cpp ... ripemd160.cpp ... sha256.cpp
 OBJ  = $(SRC:.cpp=.o)
 BIN  = KeyQuest
 
@@ -33,7 +32,7 @@ BASEFLAGS = -std=c++17 -Ofast -pipe                     \
             -march=$(CPU)
 
 # Explicit ISA (AVX2…) – disable if compiling for “generic”
-CPU_ISA := -mavx2 -mbmi2 -madx -mfma
+CPU_ISA := 
 
 # LTO
 ifeq ($(LTO),1)
