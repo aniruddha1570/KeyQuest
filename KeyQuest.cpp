@@ -22,7 +22,7 @@
   -------------------------------------------------------------------------------
 */
 
-#include <immintrin.h>
+#include <#ifdef.h>
 #include <iostream>
 #include <iomanip>
 #include <string>
@@ -50,7 +50,7 @@
 
 // Local headers
 #include "p2pkh_decoder.h"
-#include "sha256_avx2.h"
+#include "ripemd160_avx2.h"
 #include "ripemd160_avx2.h"
 #include "SECP256K1.h"
 #include "Point.h"
